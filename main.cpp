@@ -389,8 +389,8 @@ public:
 
 int main() {
     Plataforma AppStreaming;
-    // Carga correcta utilizando la ruta especificada
-    AppStreaming.cargarCSV("J:/UTEC/2026-1/P III/Laboratorio/Proyecto #1/Plataforma de Streaming/wiki_movie_plots_deduped.csv");
+    // Carga utilizando la ruta relativa
+    AppStreaming.cargarCSV("wiki_movie_plots_deduped.csv");
 
     // Pausa rapida para que veas cuantas peliculas cargaron antes de entrar a la UI
     cout << "Presiona Enter para iniciar la plataforma...";
