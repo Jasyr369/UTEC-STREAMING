@@ -83,12 +83,25 @@ Se implementó un **Suffix Trie** (Árbol de Sufijos) desde cero, utilizando pun
 
 ### Justificación Teórica
 
-Esta estructura fue implementada desde cero usando punteros y memoria dinámica. Cada nodo del trie guarda dos cosas principales: primero, un unordered_map que conecta cada carácter con su siguiente nodo; y segundo, un unordered_set de punteros a películas.
-Usamos unordered_map porque no queremos reservar espacio para todos los caracteres posibles, sino solo para los que realmente aparecen. Eso ayuda a manejar mejor la memoria. Y usamos unordered_set porque una misma película podría coincidir varias veces, pero no queremos que aparezca duplicada en los resultados.
-Una diferencia importante frente a un trie normal es que el trie normal sirve sobre todo para buscar prefijos, es decir, el inicio de una palabra. En cambio, el Suffix Trie permite buscar subpalabras. Esto hace que el sistema sea más flexible, porque el usuario puede encontrar resultados aunque escriba solo una parte del término.
-Además, el índice no se manejó como una sola estructura gigante, sino que se dividió en shards. Un shard es como una parte independiente del índice. Cada shard tiene sus propios tries para distintos campos: uno para título y sinopsis, otro para director, otro para casting y otro para género.
-Esto también ayuda más adelante con la búsqueda paralela, porque cada shard puede trabajar de manera independiente. Aunque esa parte la explicará mi compañero más adelante, la base está en que el índice ya fue diseñado pensando en dividir el trabajo.
-Sobre la complejidad, la búsqueda es eficiente porque depende principalmente del tamaño de la palabra que el usuario está buscando, no de la cantidad total de películas. Es decir, buscar una palabra corta no obliga al programa a recorrer toda la base de datos. En cambio, la inserción sí es más pesada, porque por cada palabra se insertan sus sufijos. Pero esa carga se hace al construir el índice, y luego las búsquedas quedan mucho más rápidas.
+A diferencia de un Trie estándar —que solo permite búsquedas por prefijo (inicio de palabra)— el Suffix Trie indexa cada terminación posible de las palabras. Esto permite encontrar sub-palabras de manera eficiente: si se busca `"bar"`, el árbol conduce a los nodos que contienen esa secuencia independientemente de si formaba parte de `"barco"` o `"desembarcar"`.
+
+### Diseño de los Nodos
+
+Cada nodo (`NodoTrie`) contiene:
+
+- **Contenedor asociativo:** `std::unordered_map<char, NodoTrie*>` para gestionar los hijos. Optimiza el uso de memoria al no reservar espacio para caracteres inexistentes.
+- **Contenedor de resultados:** `std::unordered_set<const Pelicula*>`. Almacena punteros únicos a las películas que contienen la secuencia de caracteres que llega a ese nodo. El uso de `set` evita duplicados en los resultados.
+
+### Sharding del Índice
+
+Para habilitar la búsqueda paralela, el Suffix Trie no es una estructura monolítica sino una colección de **shards** independientes (`IndiceShard`). Cada shard contiene cuatro tries especializados por campo:
+
+| Trie interno       | Campo indexado            |
+|--------------------|---------------------------|
+| `tituloSinopsis`   | Título (sufijos) + Sinopsis (solo prefijos) |
+| `director`         | Director                  |
+| `casting`          | Casting                   |
+| `genero`           | Género                    |
 
 ### Análisis de Complejidad (Big-O)
 
@@ -102,9 +115,25 @@ Sobre la complejidad, la búsqueda es eficiente porque depende principalmente de
 
 ## 4. Programación Genérica Avanzada
 
+El proyecto demuestra un fuerte dominio de la metaprogramación mediante plantillas (Templates) en C++17:
+
+### `Paginador<T, DefaultPageSize>` — clase template con NTTP
+
+Utiliza un *Non-Type Template Parameter* para fijar el tamaño de página en tiempo de compilación. Incluye iteradores `begin()`/`end()` para compatibilidad con rango-for y un `static_assert` que garantiza `DefaultPageSize > 0`.
+
+```cpp
 template <typename T, size_t DefaultPageSize = 5>
 class Paginador { ... };
 
+// Uso en buscarPeliculas():
+Paginador<const Pelicula*, 5> paginador(resultados);
+```
+
+### `Estadisticas<T>` — agregador numérico con SFINAE
+
+Struct genérico que aprovecha *Type Traits* (`std::enable_if_t<is_arithmetic_v<T>>`) para restringir su uso exclusivamente a tipos numéricos. Calcula mínimo, máximo y promedio sobre cualquier contenedor.
+
+```cpp
 template <typename T,
           typename = enable_if_t<is_arithmetic_v<T>>>
 struct Estadisticas {
@@ -112,23 +141,31 @@ struct Estadisticas {
     double promedio;
     size_t cantidad;
 
-template <typename Container>
+    template <typename Container>
     static Estadisticas calcular(const Container& c);
 };
 
 // Uso en benchmark:
 auto stat = Estadisticas<double>::calcular(tiemposSeq);
 cout << stat.promedio << "\n";
-// Uso en buscarPeliculas():
-Paginador<const Pelicula*, 5> paginador(resultados);
+```
 
+### `parallelReduce<>` — función genérica de orden superior
 
+Orquesta el mapeo y reducción (MapReduce) de colecciones concurrentes inyectando funciones lambda. `MapFn` y `ReduceFn` aceptan cualquier callable (lambda, función, functor).
+
+```cpp
 template <typename Resultado, typename Container, typename MapFn, typename ReduceFn>
 Resultado parallelReduce(const Container& datos, size_t numHilos,
                          MapFn mapFn, ReduceFn reduceFn, Resultado valorInicial);
+```
 
+### `ResultadoOp<T>` — wrapper genérico de retorno
 
-  template <typename T>
+Manejo funcional de éxito/error sin depender del overhead de `try/catch` constante. Inspirado en `std::expected` de C++23.
+
+```cpp
+template <typename T>
 class ResultadoOp {
     static ResultadoOp exito(T v);
     static ResultadoOp falla(string msg);
@@ -136,13 +173,7 @@ class ResultadoOp {
     const T& valor() const;
     explicit operator bool() const;
 };
-
-En esta parte usamos templates de C++ para que varias herramientas del proyecto sean reutilizables y no estén amarradas a un solo tipo de dato.
-Primero está el Paginador<T, DefaultPageSize>. Esta clase sirve para mostrar resultados por páginas. Por ejemplo, si una búsqueda devuelve muchas películas, no se muestran todas de golpe, sino en grupos. Lo interesante es que usa un parámetro genérico T, así que podría paginar películas, punteros u otros tipos de datos. Además, el tamaño de página puede definirse en tiempo de compilación con un valor por defecto.
-Luego está Estadisticas<T>, que permite calcular mínimo, máximo, promedio y cantidad sobre datos numéricos. Para evitar que se use con tipos que no tienen sentido, como strings, usamos enable_if e is_arithmetic. Eso restringe la estructura solo a tipos numéricos, como int, float o double.
-También usamos parallelReduce, que es una función genérica inspirada en la idea de MapReduce. Esta función divide una colección en partes, aplica una función a cada parte y luego combina los resultados. Lo bueno es que recibe lambdas como parámetros, así que no está limitada a una sola operación. Se puede reutilizar para distintos cálculos, especialmente en tareas paralelas.
-Por último, tenemos ResultadoOp<T>, que es un wrapper genérico para manejar operaciones que pueden salir bien o fallar. En vez de depender siempre de excepciones, esta clase permite devolver un resultado exitoso o un mensaje de error.
-
+```
 
 ---
 
